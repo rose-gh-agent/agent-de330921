@@ -4,57 +4,68 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import numpy as np
+from PIL import Image
 
 
 INPUT_PATH = Path("/home/user/attachments/rs.jpeg")
 OUTPUT_PATH = Path("/home/user/output/rs_yellow.jpeg")
+TARGET_HUE = 60.0 / 360.0
 
 
 def main() -> None:
-    image = cv2.imread(str(INPUT_PATH), cv2.IMREAD_COLOR)
-    if image is None:
-        raise FileNotFoundError(f"Could not load input image: {INPUT_PATH}")
+    image = Image.open(INPUT_PATH).convert("RGB")
+    data = np.array(image, dtype=np.float32) / 255.0
 
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
+    r = data[:, :, 0]
+    g = data[:, :, 1]
+    b = data[:, :, 2]
 
-    # Restrict edits to brighter, saturated teal/cyan metal tones.
-    color_mask = (s > 45) & (v > 30)
-    teal_mask = (h >= 72) & (h <= 125)
-    mask = color_mask & teal_mask
+    maxc = np.maximum(np.maximum(r, g), b)
+    minc = np.minimum(np.minimum(r, g), b)
+    delta = maxc - minc
 
-    # Remap the teal band into a gold band while preserving value/luminosity.
-    # 72..125 in OpenCV hue space becomes roughly 18..34 (yellow/gold).
-    if np.any(mask):
-        teal_min = 72.0
-        teal_max = 125.0
-        gold_min = 18.0
-        gold_max = 34.0
+    v = maxc
+    s = np.zeros_like(maxc)
+    nonzero = maxc != 0
+    s[nonzero] = delta[nonzero] / maxc[nonzero]
 
-        normalized = np.clip((h[mask] - teal_min) / (teal_max - teal_min), 0.0, 1.0)
-        h[mask] = gold_min + normalized * (gold_max - gold_min)
+    h = np.zeros_like(maxc)
+    mask = delta != 0
 
-        # Slight saturation lift improves the metallic gold feel without
-        # disturbing the underlying shading or contrast.
-        s[mask] = np.clip(s[mask] * 1.12 + 8.0, 0.0, 255.0)
+    rm = mask & (maxc == r)
+    h[rm] = ((g[rm] - b[rm]) / delta[rm]) % 6
 
-    hsv[:, :, 0] = h
-    hsv[:, :, 1] = s
-    hsv[:, :, 2] = v
+    gm = mask & (maxc == g)
+    h[gm] = (b[gm] - r[gm]) / delta[gm] + 2
 
-    transformed = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    result = image.copy()
-    result[mask] = transformed[mask]
+    bm = mask & (maxc == b)
+    h[bm] = (r[bm] - g[bm]) / delta[bm] + 4
+
+    h = h / 6.0
+
+    non_bg = (s > 0.05) & (v > 0.05)
+    h[non_bg] = TARGET_HUE
+
+    h6 = h * 6.0
+    i = np.floor(h6).astype(int) % 6
+    f = h6 - np.floor(h6)
+    p = v * (1 - s)
+    q = v * (1 - s * f)
+    t = v * (1 - s * (1 - f))
+
+    result = np.zeros_like(data)
+    for idx, (ri, gi, bi) in enumerate(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q))):
+        mask_i = i == idx
+        result[:, :, 0][mask_i] = ri[mask_i]
+        result[:, :, 1][mask_i] = gi[mask_i]
+        result[:, :, 2][mask_i] = bi[mask_i]
+
+    result[~non_bg] = data[~non_bg]
+
+    result_img = Image.fromarray((result * 255).astype(np.uint8), "RGB")
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    ok = cv2.imwrite(str(OUTPUT_PATH), result, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    if not ok:
-        raise RuntimeError(f"Could not write output image: {OUTPUT_PATH}")
-
+    result_img.save(OUTPUT_PATH, quality=95)
     print(f"Saved {OUTPUT_PATH}")
 
 
